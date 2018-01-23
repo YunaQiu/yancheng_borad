@@ -6,7 +6,7 @@
 模型参数： 无
 特征： 基于周数和星期的修正日期（day）
       星期的one-hot特征
-结果： A榜908072
+结果： A榜866352
 
 '''
 
@@ -86,7 +86,7 @@ def exportResult(df, fileName):
 
 if __name__ == '__main__':
     # 导入数据
-    df = importDf('./data/train_20171215.txt')
+    df = importDf('../data/train_20171215.txt')
 
     # 特征提取
     startTime = datetime.now()
@@ -115,12 +115,12 @@ if __name__ == '__main__':
 
     # 正式模型
     modelName = "linear1"
-    clf = trainModel(df[-750:][fea].values, df[-750:]['cnt'].values)
+    clf = trainModel(df[:][fea].values, df[:]['cnt'].values)
     joblib.dump(clf, './%s.pkl' % modelName, compress=3) 
 
     # 预测
     startTime = datetime.now()
-    testDf = importDf('./data/test_A_20171225.txt')
+    testDf = importDf('../data/test_A_20171225.txt')
     testDf = tickWeek(testDf, df.loc[df.index[-1], 'week'] + 1)
     testDf['day'] = testDf['week']*7 + testDf['day_of_week']
     dayDum = pd.get_dummies(testDf['day_of_week'], prefix='day_of_week')
