@@ -4,12 +4,12 @@
 '''
 模型： 线性回归
 模型参数： 无
-特征： 基于周数和星期的修正日期（day）
-      星期的one-hot特征
+特征： 星期的one-hot特征
       真实日期的年月日及月份的one-hot特征
-      是否工作日/休息日/节假日
-结果： A榜685537（后两年数据）
-遗留问题：验证集上发现用两年的数据训练的效果比用三年的更好，但提交后结果更差，为什么？怎么确认合适的训练数据量？
+      是否工作日/休息日/节假日（第三方接口）
+      元旦后及春节前后的工作日标记，元旦后工作日的修正权重
+结果： A榜590213
+遗留问题：验证集上发现用两年的数据训练的效果比用三年的更好，但提交后结果更差，为什么？
 
 '''
 
@@ -48,25 +48,74 @@ def tickWeek(df, start):
     return df
 
 # 给数据添加日期字段
-def addGuessDate(df, startYear, startMonth, startDay):
-    startDate = date(startYear, startMonth, startDay)
-    df['guess_date'] = df['day'].map(lambda x: startDate + timedelta(days=x))
+def addGuessDate(df, startDate):
+    if isinstance(startDate, str):
+        startDate = datetime.strptime(startDate, '%Y-%m-%d')
+    df['guess_date'] = df['week']*7 + df['day_of_week']
+    df['guess_date'] = df['guess_date'].map(lambda x: startDate + timedelta(days=x))
     df['year'] = df['guess_date'].map(lambda x: x.year)
     df['month'] = df['guess_date'].map(lambda x: x.month)
     df['day'] = df['guess_date'].map(lambda x: x.day)
     df['guess_date'] = pd.to_datetime(df['guess_date'])
     return df
 
-# 添加节假日标记字段
-def addHoliday(df):
-    dateList = pd.to_datetime(df.guess_date)
-    dateList = [dt.strftime('%Y%m%d') for dt in dateList]
-    # 向第三方接口请求数据(返回结果：0：工作日，1：休息日，2：节假日)
+# 请求第三方接口获取日期休假情况(date字符串格式为YYYYMMDD)
+# @param dateList: 日期格式为字符串YYYYMMDD
+# @return: 返回结果：0：工作日，1：休息日，2：节假日
+def checkHoliday(dateList):
+    if not isinstance(dateList[0], str):
+        dateList = [dt.strftime('%Y%m%d') for dt in dateList]
     url = "http://tool.bitefu.net/jiari/"
     data = urllib.parse.urlencode({'d':','.join(dateList)})
     res = urllib.request.urlopen(url, data.encode()).read()
     res = json.loads(res.decode('utf-8'))
-    df['holiday'] = list(map(lambda x: int(res[x]), dateList))
+    # 订正第三方接口返回值数值型与字符串型不统一的bug
+    for k,v in res.items():
+        res[k] = int(v)
+    return res
+
+# 添加节假日标记字段
+def addHoliday(df):
+    dateList = pd.to_datetime(df.guess_date)
+    dateList = [dt.strftime('%Y%m%d') for dt in dateList]
+    res = checkHoliday(dateList)
+    df['holiday'] = list(map(lambda x: res[x], dateList))
+    return df
+
+# 添加元旦后工作日字段
+def addAfterNewyear(df, dayLen):
+    df['is_after_newyear'] = df['after_new_year_weight'] = 0
+    for y in df.year.value_counts().index:
+        dateList = pd.date_range(start='%d-01-01'%y ,end='%d-01-30'%y, freq='D')
+        dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
+        dateSeries.index = dateList
+        dateList = dateSeries[dateSeries==0].index[:dayLen]
+        df.loc[df.guess_date.isin(dateList), 'is_after_newyear'] = 1
+
+        weightSeries = pd.Series([dayLen-i for i in range(0,dayLen)], index=dateList)
+        interIndex = np.intersect1d(weightSeries.index, df.guess_date)
+        df.loc[df.guess_date.isin(dateList), 'after_new_year_weight'] = weightSeries[interIndex].values
+    return df
+
+# 添加春节前后工作日字段
+def addAroundSpringFest(df, beforeDayLen, afterDayLen):
+    df['is_before_spring_fest'] = df['is_after_spring_fest'] = df['last_day_before_spring'] = 0
+    springFest = {
+        2013:date(2013,2,10),
+        2014:date(2014,1,31),
+        2015:date(2015,2,19),
+        2016:date(2016,2,8),
+        2017:date(2017,1,28)}
+    for y in df.year.value_counts().index:
+        dateList = pd.date_range(start='%d-01-01'%y ,end='%d-03-10'%y, freq='D')
+        dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
+        dateSeries.index = dateList
+        
+        beforeList = dateSeries[:springFest[y]][dateSeries==0].index[-beforeDayLen:]
+        df.loc[df.guess_date.isin(beforeList), 'is_before_spring_fest'] = 1
+        df.loc[df.guess_date==beforeList[-1], 'last_day_before_spring'] = 1
+        afterList = dateSeries[springFest[y]:][dateSeries==0].index[:afterDayLen]
+        df.loc[df.guess_date.isin(afterList), 'is_after_spring_fest'] = 1
     return df
 
 # 计算统计量
@@ -102,6 +151,16 @@ def scalerFea(df, cols):
     df[cols] = scaler.fit_transform(df[cols].values)
     return df,scaler
 
+# 特征方法汇总
+def feaFactory(df, startWeek=0):
+    df = tickWeek(df, startWeek)
+    df = addGuessDate(df,'2012-12-30')
+    df = addHoliday(df)
+    df = addAfterNewyear(df, 5)
+    df = addAroundSpringFest(df, 9, 5)
+    df = addOneHot(df, ['day_of_week','month','holiday'])
+    return df
+
 # 训练模型
 def trainModel(X, y):
     clf = linear_model.RidgeCV(alphas=[.2*x for x in range(1,100)], scoring='neg_mean_squared_error')
@@ -130,17 +189,16 @@ if __name__ == '__main__':
     # 特征提取
     startTime = datetime.now()
     df = pd.pivot_table(df,index=["date"], values=["cnt","day_of_week"], aggfunc={"cnt":np.sum, "day_of_week": np.max})
-    df = tickWeek(df, 0)
     df.reset_index(inplace=True)
-    df['day'] = df['week']*7 + df['day_of_week']
-    df = addGuessDate(df,2012,12,30)
-    df = addHoliday(df)
-    df = addOneHot(df, ['day_of_week','month','holiday'])
-    df,scaler = scalerFea(df, ['year'])
+    df = feaFactory(df)
+    scaleCols = 'year'
+    df,scaler = scalerFea(df, scaleCols)
     df = df.dropna()
     print("feature time: ", datetime.now() - startTime)
-    print("训练集：\n",df.tail(30))
-    fea = ['year','month','day']
+    print("训练集：\n",df.tail())
+    fea = ['year','month','day',
+        'is_after_newyear','after_new_year_weight',
+        'is_before_spring_fest','last_day_before_spring','is_after_spring_fest']
     fea.extend(['month_%d'%x for x in range(1,13)])
     fea.extend(['day_of_week_%d'%x for x in range(1,8)])
     fea.extend(['holiday_%d'%x for x in range(0,3)])
@@ -161,26 +219,23 @@ if __name__ == '__main__':
     print("training time: ", datetime.now() - startTime)
     print("训练数据量：", trainN)
     print("cost:", cost)
-    # exit()
+    exit()
 
     # 正式模型
-    modelName = "linear1_addHoliday"
-    trainDf = df[df.guess_date >= df.iloc[-1].guess_date-trainN]
-    clf = trainModel(trainDf[fea].values, trainDf['cnt'].values)
+    modelName = "linear1_addFestival"
+    # trainDf = df[df.guess_date >= df.iloc[-1].guess_date-trainN]
+    clf = trainModel(df[fea].values, df['cnt'].values)
     joblib.dump(clf, './%s.pkl' % modelName, compress=3) 
 
     # 预测
     startTime = datetime.now()
     predictDf = importDf('../data/test_A_20171225.txt')
-    predictDf = tickWeek(predictDf, df.loc[df.index[-1], 'week'])
-    predictDf['day'] = predictDf['week']*7 + predictDf['day_of_week']
-    predictDf = addGuessDate(predictDf,2012,12,30)
-    predictDf = addHoliday(predictDf)
-    predictDf = addOneHot(predictDf, ['day_of_week','month','holiday'])
+    predictDf = feaFactory(predictDf, startWeek=df.loc[df.index[-1], 'week'])
+    # 填补缺失字段
     for x in range(1,13):
         if 'month_%d'%x not in predictDf.columns:
             predictDf['month_%d'%x] = 0
-    predictDf['year'] = scaler.transform(predictDf['year'].values)
+    predictDf[scaleCols] = scaler.transform(predictDf[scaleCols].values)
     print("预测集：\n",predictDf.head(10))
     print(predictDf[fea].info())
     predictDf['predict'] = clf.predict(predictDf[fea].values)
