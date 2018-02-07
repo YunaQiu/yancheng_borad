@@ -84,7 +84,7 @@ def scalerFea(df, cols):
     df.dropna(inplace=True)
     scaler = MinMaxScaler()
     df[cols] = scaler.fit_transform(df[cols].values)
-    return df,scaler.scale_
+    return df,scaler
 
 # 训练模型
 def trainModel(X, y):
@@ -118,7 +118,7 @@ def predict(trainDf, testDf, fea, scaler, statCols):
             stat = statCnt(trainDf.loc[trainDf.week==(w-1),'cnt'].values)
         else:
             stat = statCnt(testDf.loc[testDf.week==(w-1),'predict'].values)
-        stat *= scaler
+        stat = scaler.transform(stat)
         testDf.loc[testDf.week==w, statCols] = stat
         testDf.loc[testDf.week==w, 'predict'] = clf.predict(testDf.loc[testDf.week==w, fea].values)
     return testDf
@@ -142,7 +142,6 @@ if __name__ == "__main__":
     df = addOneHot(df, 'day_of_week')
     # statCols = ['mean1','std1','max1','min1']
     df, scaler = scalerFea(df, statCols)
-    print("stat scaler: ", scaler)
     df = df.dropna()
     print("feature time: ", datetime.now() - startTime)
     print(df.info())
