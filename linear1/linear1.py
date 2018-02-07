@@ -5,10 +5,10 @@
 模型： 线性回归
 模型参数： 无
 特征： 星期的one-hot特征
-      真实日期的年月日及月份的one-hot特征
+      真实日期的年月日及月份的one-hot特征，一年中的第几天
       是否工作日/休息日/节假日（第三方接口）
-      元旦后及春节前后的工作日标记，元旦后工作日的修正权重
-结果： A榜590213
+      元旦后/春节前后/国庆后的工作日标记，元旦后工作日的修正权重
+结果： A榜554095
 遗留问题：验证集上发现用两年的数据训练的效果比用三年的更好，但提交后结果更差，为什么？
 
 '''
@@ -19,6 +19,7 @@ import numpy as np
 from scipy.stats import mode
 import csv
 import matplotlib.dates
+import matplotlib.pyplot as plt
 from datetime import *
 import urllib, urllib.parse, urllib.request
 import json
@@ -56,6 +57,7 @@ def addGuessDate(df, startDate):
     df['year'] = df['guess_date'].map(lambda x: x.year)
     df['month'] = df['guess_date'].map(lambda x: x.month)
     df['day'] = df['guess_date'].map(lambda x: x.day)
+    df['day_of_year'] = df['guess_date'].map(lambda x: (x.date() - date(x.year,1,1)).days)
     df['guess_date'] = pd.to_datetime(df['guess_date'])
     return df
 
@@ -118,6 +120,17 @@ def addAroundSpringFest(df, beforeDayLen, afterDayLen):
         df.loc[df.guess_date.isin(afterList), 'is_after_spring_fest'] = 1
     return df
 
+# 添加国庆后工作日字段
+def addAfterNational(df, dayLen):
+    df['is_after_national'] = 0
+    for y in df.year.value_counts().index:
+        dateList = pd.date_range(start='%d-10-01'%y ,end='%d-10-10'%y, freq='D')
+        dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
+        dateSeries.index = dateList
+        dateList = dateSeries[dateSeries==0].index[:dayLen]
+        df.loc[df.guess_date.isin(dateList), 'is_after_national'] = 1
+    return df
+
 # 计算统计量
 def statCnt(cntArr):
     cntArr = np.array(cntArr)
@@ -158,12 +171,13 @@ def feaFactory(df, startWeek=0):
     df = addHoliday(df)
     df = addAfterNewyear(df, 5)
     df = addAroundSpringFest(df, 9, 5)
+    df = addAfterNational(df, 1)
     df = addOneHot(df, ['day_of_week','month','holiday'])
     return df
 
 # 训练模型
 def trainModel(X, y):
-    clf = linear_model.RidgeCV(alphas=[.2*x for x in range(1,100)], scoring='neg_mean_squared_error')
+    clf = linear_model.RidgeCV(alphas=[0.01*x for x in range(1,200)], scoring='neg_mean_squared_error')
     clf.fit(X, y)
     print('Coefficients:', clf.coef_)
     print('alpha:', clf.alpha_)
@@ -178,8 +192,15 @@ def trainTestSplit(df, splitN, trainLabel):
     return (trainX, trainY, testX, testY)
 
 # 导出预测结果
-def exportResult(df, fileName):
-    df.to_csv('./%s.txt' % fileName, sep='\t', header=False, index=False)
+def exportResult(df, fileName, header=False, index=False):
+    df.to_csv('./%s.txt' % fileName, sep='\t', header=header, index=index)
+
+# 统计预测误差
+def countDeltaY(predictSeries, labelSeries):
+    deltaSeries = predictSeries - labelSeries
+    deltaSeries.plot(style='b-')
+    plt.show()
+    return deltaSeries
 
 
 if __name__ == '__main__':
@@ -196,9 +217,10 @@ if __name__ == '__main__':
     df = df.dropna()
     print("feature time: ", datetime.now() - startTime)
     print("训练集：\n",df.tail())
-    fea = ['year','month','day',
+    fea = ['year','month','day','day_of_year',
         'is_after_newyear','after_new_year_weight',
-        'is_before_spring_fest','last_day_before_spring','is_after_spring_fest']
+        'is_before_spring_fest','last_day_before_spring','is_after_spring_fest',
+        'is_after_national']
     fea.extend(['month_%d'%x for x in range(1,13)])
     fea.extend(['day_of_week_%d'%x for x in range(1,8)])
     fea.extend(['holiday_%d'%x for x in range(0,3)])
@@ -206,9 +228,11 @@ if __name__ == '__main__':
 
     # 划分训练测试集
     splitDate = date(2015,6,1)
-    trainN = timedelta(days=2*365)
-    trainDf = df[(df.guess_date >= splitDate-trainN) & (df.guess_date < splitDate)]
-    testDf = df[(df.guess_date >= splitDate) & (df.guess_date < splitDate+timedelta(days=300))]
+    # trainN = timedelta(days=3*365)
+    trainDf = df[(df.guess_date < splitDate)]
+    # trainDf = df[(df.guess_date >= splitDate-trainN) & (df.guess_date < splitDate)]
+    testDf = df[(df.guess_date >= splitDate)]
+    # testDf = df[(df.guess_date >= splitDate) & (df.guess_date < splitDate+timedelta(days=300))]
     print("模型输入：\n",trainDf[fea].info())
 
     # 检验模型
@@ -217,9 +241,11 @@ if __name__ == '__main__':
     testDf['predict'] = clf.predict(testDf[fea].values)
     cost = metrics.mean_squared_error(testDf['cnt'].values, testDf['predict'].values) 
     print("training time: ", datetime.now() - startTime)
-    print("训练数据量：", trainN)
+    # print("训练数据量：", trainN)
     print("cost:", cost)
-    exit()
+    deltaSeries = countDeltaY(testDf.set_index(['guess_date'])['predict'], testDf.set_index(['guess_date'])['cnt'])
+    print(deltaSeries[abs(deltaSeries)>1000])
+    # exit()
 
     # 正式模型
     modelName = "linear1_addFestival"
@@ -238,6 +264,7 @@ if __name__ == '__main__':
     predictDf[scaleCols] = scaler.transform(predictDf[scaleCols].values)
     print("预测集：\n",predictDf.head(10))
     print(predictDf[fea].info())
+    # exportResult(predictDf.set_index(['guess_date'])[fea], "%s_predict" % modelName, header=True, index=True)
     predictDf['predict'] = clf.predict(predictDf[fea].values)
     print("预测结果：\n",predictDf[['date','predict']].head(10))
     predictDf.loc[0,'predict'] = df.iloc[-1]['cnt']    #漏洞：预测集A第一个数据的结果直接替换成训练集最后一个数据的值
