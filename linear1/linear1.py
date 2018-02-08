@@ -5,11 +5,14 @@
 模型： 线性回归
 模型参数： 无
 特征： 星期的one-hot特征
-      真实日期的年月日及月份的one-hot特征，一年中的第几天
+      真实日期的年月日及月份的one-hot特征，一年中的第几天，月日的数值拼接
       是否工作日/休息日/节假日（第三方接口）
-      元旦后/春节前后/国庆后的工作日标记，元旦后工作日的修正权重
-结果： A榜554095
+      元旦后5个工作日，元旦后工作日的修正权重
+      春节前9个工作日/春节前5个工作日/春节前1个工作日
+      国庆后1个工作日
+结果： A榜553557
 遗留问题：验证集上发现用两年的数据训练的效果比用三年的更好，但提交后结果更差，为什么？
+        线下验证集误差与线上误差相差太远
 
 '''
 
@@ -58,6 +61,7 @@ def addGuessDate(df, startDate):
     df['month'] = df['guess_date'].map(lambda x: x.month)
     df['day'] = df['guess_date'].map(lambda x: x.day)
     df['day_of_year'] = df['guess_date'].map(lambda x: (x.date() - date(x.year,1,1)).days)
+    df['month_day'] = df['guess_date'].map(lambda x: x.month*100+x.day)
     df['guess_date'] = pd.to_datetime(df['guess_date'])
     return df
 
@@ -86,13 +90,13 @@ def addHoliday(df):
 
 # 添加元旦后工作日字段
 def addAfterNewyear(df, dayLen):
-    df['is_after_newyear'] = df['after_new_year_weight'] = 0
+    df['is_after_newyear%d'%dayLen] = df['after_new_year_weight'] = 0
     for y in df.year.value_counts().index:
         dateList = pd.date_range(start='%d-01-01'%y ,end='%d-01-30'%y, freq='D')
         dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
         dateSeries.index = dateList
         dateList = dateSeries[dateSeries==0].index[:dayLen]
-        df.loc[df.guess_date.isin(dateList), 'is_after_newyear'] = 1
+        df.loc[df.guess_date.isin(dateList), 'is_after_newyear%d'%dayLen] = 1
 
         weightSeries = pd.Series([dayLen-i for i in range(0,dayLen)], index=dateList)
         interIndex = np.intersect1d(weightSeries.index, df.guess_date)
@@ -100,8 +104,8 @@ def addAfterNewyear(df, dayLen):
     return df
 
 # 添加春节前后工作日字段
-def addAroundSpringFest(df, beforeDayLen, afterDayLen):
-    df['is_before_spring_fest'] = df['is_after_spring_fest'] = df['last_day_before_spring'] = 0
+def addBeforeSpringFest(df, beforeDayLen):
+    df['is_before_spring_fest%d'%beforeDayLen] = df['before_spring_fest_weight'] = 0
     springFest = {
         2013:date(2013,2,10),
         2014:date(2014,1,31),
@@ -114,21 +118,42 @@ def addAroundSpringFest(df, beforeDayLen, afterDayLen):
         dateSeries.index = dateList
         
         beforeList = dateSeries[:springFest[y]][dateSeries==0].index[-beforeDayLen:]
-        df.loc[df.guess_date.isin(beforeList), 'is_before_spring_fest'] = 1
-        df.loc[df.guess_date==beforeList[-1], 'last_day_before_spring'] = 1
+        df.loc[df.guess_date.isin(beforeList), 'is_before_spring_fest%d'%beforeDayLen] = 1
+        weightSeries = pd.Series(list(range(1,beforeDayLen+1)), index=beforeList)
+        interIndex = np.intersect1d(weightSeries.index, df.guess_date)
+        df.loc[df.guess_date.isin(beforeList), 'before_spring_fest_weight'] = weightSeries[interIndex].values
+    return df
+
+# 添加春节前后工作日字段
+def addAfterSpringFest(df, afterDayLen):
+    df['is_after_spring_fest%d'%afterDayLen] = df['after_spring_fest_weight'] = 0
+    springFest = {
+        2013:date(2013,2,10),
+        2014:date(2014,1,31),
+        2015:date(2015,2,19),
+        2016:date(2016,2,8),
+        2017:date(2017,1,28)}
+    for y in df.year.value_counts().index:
+        dateList = pd.date_range(start='%d-01-01'%y ,end='%d-03-10'%y, freq='D')
+        dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
+        dateSeries.index = dateList
+
         afterList = dateSeries[springFest[y]:][dateSeries==0].index[:afterDayLen]
-        df.loc[df.guess_date.isin(afterList), 'is_after_spring_fest'] = 1
+        df.loc[df.guess_date.isin(afterList), 'is_after_spring_fest%d'%afterDayLen] = 1
+        weightSeries = pd.Series(list(range(afterDayLen,0,-1)), index=afterList)
+        interIndex = np.intersect1d(weightSeries.index, df.guess_date)
+        df.loc[df.guess_date.isin(afterList), 'after_spring_fest_weight'] = weightSeries[interIndex].values
     return df
 
 # 添加国庆后工作日字段
 def addAfterNational(df, dayLen):
-    df['is_after_national'] = 0
+    df['is_after_national%d'%dayLen] = 0
     for y in df.year.value_counts().index:
         dateList = pd.date_range(start='%d-10-01'%y ,end='%d-10-10'%y, freq='D')
         dateSeries = pd.Series(checkHoliday(dateList.strftime('%Y%m%d')))
         dateSeries.index = dateList
         dateList = dateSeries[dateSeries==0].index[:dayLen]
-        df.loc[df.guess_date.isin(dateList), 'is_after_national'] = 1
+        df.loc[df.guess_date.isin(dateList), 'is_after_national%d'%dayLen] = 1
     return df
 
 # 计算统计量
@@ -170,7 +195,10 @@ def feaFactory(df, startWeek=0):
     df = addGuessDate(df,'2012-12-30')
     df = addHoliday(df)
     df = addAfterNewyear(df, 5)
-    df = addAroundSpringFest(df, 9, 5)
+    df = addBeforeSpringFest(df, 1)
+    df = addBeforeSpringFest(df, 9)
+    df = addBeforeSpringFest(df, 5)
+    df = addAfterSpringFest(df, 5)
     df = addAfterNational(df, 1)
     df = addOneHot(df, ['day_of_week','month','holiday'])
     return df
@@ -217,22 +245,22 @@ if __name__ == '__main__':
     df = df.dropna()
     print("feature time: ", datetime.now() - startTime)
     print("训练集：\n",df.tail())
-    fea = ['year','month','day','day_of_year',
-        'is_after_newyear','after_new_year_weight',
-        'is_before_spring_fest','last_day_before_spring','is_after_spring_fest',
-        'is_after_national']
+    fea = ['year','month','day','day_of_year','month_day',
+        'is_after_newyear5','after_new_year_weight',
+        'is_before_spring_fest9','is_before_spring_fest5','is_before_spring_fest1','is_after_spring_fest5',#'before_spring_fest_weight','after_spring_fest_weight',
+        'is_after_national1']
     fea.extend(['month_%d'%x for x in range(1,13)])
     fea.extend(['day_of_week_%d'%x for x in range(1,8)])
     fea.extend(['holiday_%d'%x for x in range(0,3)])
     print("训练特征:",fea)
 
     # 划分训练测试集
-    splitDate = date(2015,6,1)
-    # trainN = timedelta(days=3*365)
-    trainDf = df[(df.guess_date < splitDate)]
-    # trainDf = df[(df.guess_date >= splitDate-trainN) & (df.guess_date < splitDate)]
-    testDf = df[(df.guess_date >= splitDate)]
-    # testDf = df[(df.guess_date >= splitDate) & (df.guess_date < splitDate+timedelta(days=300))]
+    splitN = int(df.index[-1] * 0.67)
+    trainDf = df.loc[:splitN]
+    testDf = df.loc[splitN:]
+    # splitDate = date(2015,4,1)
+    # trainDf = df[(df.guess_date < splitDate)]
+    # testDf = df[(df.guess_date >= splitDate)]
     print("模型输入：\n",trainDf[fea].info())
 
     # 检验模型
@@ -264,8 +292,8 @@ if __name__ == '__main__':
     predictDf[scaleCols] = scaler.transform(predictDf[scaleCols].values)
     print("预测集：\n",predictDf.head(10))
     print(predictDf[fea].info())
-    # exportResult(predictDf.set_index(['guess_date'])[fea], "%s_predict" % modelName, header=True, index=True)
     predictDf['predict'] = clf.predict(predictDf[fea].values)
     print("预测结果：\n",predictDf[['date','predict']].head(10))
+    exportResult(predictDf.set_index(['guess_date'])[['predict']+fea], "%s_predict" % modelName, header=True, index=True)
     predictDf.loc[0,'predict'] = df.iloc[-1]['cnt']    #漏洞：预测集A第一个数据的结果直接替换成训练集最后一个数据的值
     exportResult(predictDf[['date','predict']], "%s_A" % modelName)
