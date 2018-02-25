@@ -30,7 +30,7 @@ import json
 from sklearn.preprocessing import *
 from sklearn import linear_model
 from sklearn import metrics
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, KFold
 from sklearn.externals import joblib
 
 # 导入数据
@@ -220,15 +220,34 @@ def trainTestSplit(df, splitN, trainLabel):
     return (trainX, trainY, testX, testY)
 
 # 导出预测结果
-def exportResult(df, fileName, header=False, index=False):
-    df.to_csv('./%s.txt' % fileName, sep='\t', header=header, index=index)
+def exportResult(df, fileName, header=False, index=False, sep=','):
+    df.to_csv('./%s' % fileName, sep=sep, header=header, index=index)
 
 # 统计预测误差
-def countDeltaY(predictSeries, labelSeries):
+def countDeltaY(predictSeries, labelSeries, show=True, title='', subplot=None):
     deltaSeries = predictSeries - labelSeries
+    if subplot!=None:
+        plt.subplot(subplot[0], subplot[1], subplot[2])
     deltaSeries.plot(style='b-')
-    plt.show()
+    plt.title(title)
+    if show:
+        plt.show()
     return deltaSeries
+
+def getOof(clf, trainX, trainY, testX, nFold=10):
+    oofTrain = np.zeros(trainX.shape[0])
+    oofTest = np.zeros(testX.shape[0])
+    oofTestSkf = np.zeros((testX.shape[0], nFold))
+    kf = KFold(n_splits=nFold, shuffle=True)
+    for i, (trainIdx, testIdx) in enumerate(kf.split(trainX)):
+        kfTrainX = trainX[trainIdx]
+        kfTrainY = trainY[trainIdx]
+        kfTestX = trainX[testIdx]
+        clf.fit(kfTrainX, kfTrainY)
+        oofTrain[testIdx] = clf.predict(kfTestX)
+        oofTestSkf[:,i] = clf.predict(testX)
+    oofTest[:] = oofTestSkf.mean(axis=1)
+    return oofTrain, oofTest
 
 
 if __name__ == '__main__':
@@ -247,7 +266,7 @@ if __name__ == '__main__':
     print("训练集：\n",df.tail())
     fea = ['year','month','day','day_of_year','month_day',
         'is_after_newyear5','after_new_year_weight',
-        'is_before_spring_fest9','is_before_spring_fest5','is_before_spring_fest1','is_after_spring_fest5',#'before_spring_fest_weight','after_spring_fest_weight',
+        'is_before_spring_fest9','is_before_spring_fest5','is_before_spring_fest1','is_after_spring_fest5',
         'is_after_national1']
     fea.extend(['month_%d'%x for x in range(1,13)])
     fea.extend(['day_of_week_%d'%x for x in range(1,8)])
@@ -267,12 +286,22 @@ if __name__ == '__main__':
     startTime = datetime.now()
     clf = trainModel(trainDf[fea].values, trainDf['cnt'].values)
     testDf['predict'] = clf.predict(testDf[fea].values)
+    testDf['predict'] = testDf['predict'].map(lambda x: 15 if x<15 else x)   #修正负数值
     cost = metrics.mean_squared_error(testDf['cnt'].values, testDf['predict'].values) 
     print("training time: ", datetime.now() - startTime)
     # print("训练数据量：", trainN)
     print("cost:", cost)
-    deltaSeries = countDeltaY(testDf.set_index(['guess_date'])['predict'], testDf.set_index(['guess_date'])['cnt'])
+    deltaSeries = countDeltaY(testDf.set_index(['guess_date'])['predict'], testDf.set_index(['guess_date'])['cnt'], show=False, subplot=(2,2,1))
     print(deltaSeries[abs(deltaSeries)>1000])
+
+    # 交叉验证预测训练集测试集结果
+    trainDf['predict'], testDf['predict2'] = getOof(clf, trainDf[fea].values, trainDf['cnt'].values, testDf[fea].values, nFold=10)
+    cost = metrics.mean_squared_error(testDf['cnt'].values, testDf['predict2'])
+    print("test cost:", cost)
+    deltaSeries = countDeltaY(testDf.set_index(['guess_date'])['predict2'], testDf.set_index(['guess_date'])['cnt'], show=False, subplot=(2,2,2))    
+    cost = metrics.mean_squared_error(trainDf['cnt'].values, trainDf['predict'].values) 
+    print("train cost:", cost)
+    deltaSeries = countDeltaY(trainDf.set_index(['guess_date'])['predict'], trainDf.set_index(['guess_date'])['cnt'], show=False, subplot=(2,2,3))    
     # exit()
 
     # 正式模型
@@ -286,14 +315,21 @@ if __name__ == '__main__':
     predictDf = importDf('../data/test_A_20171225.txt')
     predictDf = feaFactory(predictDf, startWeek=df.loc[df.index[-1], 'week'])
     # 填补缺失字段
-    for x in range(1,13):
-        if 'month_%d'%x not in predictDf.columns:
-            predictDf['month_%d'%x] = 0
+    for x in [x for x in fea if x not in predictDf.columns]:
+        predictDf[x] = 0
     predictDf[scaleCols] = scaler.transform(predictDf[scaleCols].values)
     print("预测集：\n",predictDf.head(10))
     print(predictDf[fea].info())
     predictDf['predict'] = clf.predict(predictDf[fea].values)
+    predictDf['predict'] = predictDf['predict'].map(lambda x: 15 if x<15 else x)   #修正负数值
     print("预测结果：\n",predictDf[['date','predict']].head(10))
-    exportResult(predictDf.set_index(['guess_date'])[['predict']+fea], "%s_predict" % modelName, header=True, index=True)
+    exportResult(predictDf.set_index(['guess_date'])[['predict']+fea], "%s_predict.csv" % modelName, header=True, index=True)
     predictDf.loc[0,'predict'] = df.iloc[-1]['cnt']    #漏洞：预测集A第一个数据的结果直接替换成训练集最后一个数据的值
-    exportResult(predictDf[['date','predict']], "%s_A" % modelName)
+    exportResult(predictDf[['date','predict']], "%s_A.txt" % modelName, sep='\t')
+
+    # 生成模型融合数据集
+    df['predict'], predictDf['predict'] = getOof(clf, df[fea].values, df['cnt'].values, predictDf[fea].values, nFold=10)
+    predictDf['predict'] = predictDf['predict'].map(lambda x: 15 if x<15 else x)   #修正负数值
+    exportResult(df[['date','predict']], "%s_oof_train.csv" % modelName, header=True)
+    exportResult(predictDf[['date','predict']], "%s_oof_testA.csv" % modelName, header=True)
+
