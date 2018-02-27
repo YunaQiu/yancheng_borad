@@ -80,19 +80,12 @@ def addHoliday(df):
     df['holiday'] = list(map(lambda x: res[x], dateList))
     return df
 
-# # 特征方法汇总
-# def feaFactory(df, startWeek=0):
-#     df = tickWeek(df, startWeek)
-#     df = addGuessDate(df,'2012-12-30')
-#     df = addHoliday(df)
-#     df = addAfterNewyear(df, 5)
-#     df = addBeforeSpringFest(df, 1)
-#     df = addBeforeSpringFest(df, 9)
-#     df = addBeforeSpringFest(df, 5)
-#     df = addAfterSpringFest(df, 5)
-#     df = addAfterNational(df, 1)
-#     df = addOneHot(df, ['day_of_week','month','holiday'])
-#     return df
+# 特征方法汇总
+def feaFactory(df, startWeek=0):
+    df = tickWeek(df, startWeek)
+    df = addGuessDate(df,'2012-12-30')
+    df = addHoliday(df)
+    return df
 
 # 划分训练集和测试集
 def trainTestSplit(df, splitN, trainLabel):
@@ -121,21 +114,21 @@ def countDeltaY(predictSeries, labelSeries, show=True, title='', subplot=None):
 if __name__ == '__main__':
     # 导入数据
     dfs = []
-    dfs.append(importDf('../lake/result14_A-50.txt', header=None, index_col=0))
-    dfs.append(importDf('../linear1/linear1_A(553557).txt', header=None, index_col=0))
-    dfs.append(importDf('../keng/linear_keng_2_8.txt', header=None, index_col=0))
+    dfs.append(importDf('../lake/result1_B-50.txt', header=None, index_col=0))
+    dfs.append(importDf('../linear1/linear1B.txt', header=None, index_col=0))
+    dfs.append(importDf('../keng/linear_model_B_keng_2_25.txt', header=None, index_col=0))
     for df in dfs:
         df.columns = ['predict']
         df.index.name = 'date'
-        print(df.head())
     df = pd.concat(dfs, axis=1, keys=['lake', 'yuna', 'keng'])
     df.columns = [x[0]+'_'+x[1] for x in df.columns]
+    otherDf = importDf('../linear1/linear1B_predict.csv', sep=',', index_col=0)
+    df = pd.merge(df, otherDf[['guess_date', 'day_of_week', 'holiday']], how='left',left_index=True, right_index=True)
     # 按排名加权平均
-    df['yuna_predict'] = df['yuna_predict'].map(lambda x: 15 if x<15 else x)   #修正负数值
     df['predict'] = df['lake_predict']*0.85 + df['yuna_predict']*0.04 + df['keng_predict']*0.11
     print(df.head())
 
-    modelName = 'average'
+    modelName = 'average0226'
     exportResult(df, "%s_predict.csv" % modelName, header=True, index=True, sep=',')
-    df.loc[1032,'predict'] = 1306    #漏洞：预测集A第一个数据的结果直接替换成训练集最后一个数据的值
-    exportResult(df.reset_index()[['date','predict']], "%s_A.txt" % modelName)
+    # df.loc[1032,'predict'] = 1306    #漏洞：预测集A第一个数据的结果直接替换成训练集最后一个数据的值
+    exportResult(df.reset_index()[['date','predict']], "%s_B.txt" % modelName)
