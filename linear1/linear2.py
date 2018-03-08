@@ -2,26 +2,28 @@
 # -*-coding:utf-8-*-
 
 '''
-模型： 岭回归CV，按品牌拆分成10个模型训练
-模型参数： alpha取值：0.02:0.02:10
+模型： 岭回归CV，按品牌拆分，再按假日类型0和假日类型1拆分，共20个模型训练
+模型参数： alpha取值：(0.05*i)**2 for i in range(1,100)
 特征： 星期1~6的onehot标记
       月份1~12的onehot标记
       节假日类型0/1/2的onehot标记
       周日休息日标记
-      本月销售量（取自零售量比赛数据，其中17年11月数据根据网上的16年同期增长比估算）
-      元旦后3个工作日，元旦后5个工作日
+      上月销售量，上月销售量同比
+      元旦前3天，元旦前5天，元旦后1天，元旦后3个工作日，元旦后5个工作日，元旦后权重
       春节前9个工作日/春节前5个工作日/春节前1个工作日/春节后3个工作日
       五一后1个工作日
-      国庆后1个工作日
-后期处理：小于0的值设为0,周日休息日大于100的值减100
-结果： A榜（34835）
+      国庆后1个工作日，国庆前3天
+前期处理：训练前先做数据清洗：将异常值清除
+后期处理：假日类型2的预测值采用分品牌假日2的历史中位数
+        小于0的值设为0
+结果： A榜（49479）
 
 '''
 
 import pandas as pd
 from pandas import Series, DataFrame
 import numpy as np
-from scipy.stats import mode
+from scipy.stats import mode, pearsonr
 import csv
 import matplotlib.dates
 import matplotlib.pyplot as plt
@@ -85,6 +87,19 @@ def addHoliday(df):
 # 添加周日休息日标记
 def addSundayHoliday(df):
     df['is_sunday_holiday'] = df.apply(lambda x: 1 if (x.day_of_week==7)&(x.holiday>0) else 0, axis=1)
+    return df
+
+# 异常数据清除
+def cleanDf(df):
+    tempDf = df.copy()
+    tempDf['unusual'] = tempDf.apply(lambda x: x.cnt > tempDf[(tempDf.brand==x.brand)&(abs(tempDf.date-x.date)<7)&(tempDf.date-x.date!=0)]['cnt'].max() * 1.8, axis=1)
+    tempDf.loc[tempDf.unusual,'unusual'] = tempDf[tempDf.unusual].apply(lambda x: tempDf[(tempDf.unusual)&(tempDf.date==x.date)].brand.count() < 3, axis=1)
+    cleanIndex = set()
+    cleanIndex |= set(tempDf[tempDf.unusual].index)
+    cleanIndex |= set(df[(df.holiday==1)&(df.cnt>400)].index)
+    cleanIndex |= set(df[(df.holiday==2)&(df.cnt>70)].index)
+    cleanIndex |= set(df[(df.is_sunday_holiday==1)&(df.cnt>150)].index)
+    df.drop(cleanIndex, inplace=True)
     return df
 
 # 添加元旦前工作日字段
@@ -200,11 +215,23 @@ def addSaleFea(df):
     return df
 
 # 添加历史上牌统计数据
-def addHistoryFea(df):
-    brandDf = pd.pivot_table(df, index=['brand', 'holiday'], values='cnt', aggfunc=[np.mean, np.median])
-    brandDf.columns = ['cnt_mean', 'cnt_median']
-    brandDf.reset_index(inplace=True)
-    df = df.merge(brandDf, how='left', on=['brand', 'holiday'])
+def addHistoryFea(df, cntDf=None):
+    if not(isinstance(cntDf, pd.DataFrame)):
+        cntDf = df.copy()
+    brandDf = cntDf.sort_values(by=['brand','date','holiday']).set_index(['brand','date','holiday'])[['cnt']]
+    df['cnt_his'] = df[['brand','date','holiday']].apply(lambda x: list(brandDf.loc[pd.IndexSlice[x.brand,:x.date,x.holiday],'cnt'].values), axis=1).values
+    df['cnt_holiday_mean'] = df['cnt_his'].map(lambda x: np.mean(x))
+    df['cnt_holiday_median'] = df['cnt_his'].map(lambda x: np.median(x))
+    df['cnt_holiday_max'] = df['cnt_his'].map(lambda x: np.max(x))
+    df['cnt_holiday_min'] = df['cnt_his'].map(lambda x: np.min(x))
+
+    # monthDf = cntDf.sort_values(by=['brand','date','month']).set_index(['brand','date','month'])[['cnt']]
+    # df['cnt_his'] = df[['brand','date','month']].apply(lambda x: list(monthDf.loc[pd.IndexSlice[x.brand,:x.date,x.month],'cnt'].values), axis=1).values
+    # df['cnt_month_mean'] = df['cnt_his'].map(lambda x: np.mean(x))
+    # df['cnt_month_median'] = df['cnt_his'].map(lambda x: np.median(x))
+    # df['cnt_month_max'] = df['cnt_his'].map(lambda x: np.max(x))
+    # df['cnt_month_min'] = df['cnt_his'].map(lambda x: np.min(x))
+    df.drop(['cnt_his'], axis=1, inplace=True)
     return df
 
 # 添加one-hot编码并保留原字段
@@ -224,12 +251,14 @@ def scalerFea(df, cols):
     return df,scaler
 
 # 特征方法汇总
-def feaFactory(df, startWeek=0):
+def feaFactory(df, startWeek=0, cntDf=None):
     df = tickWeek(df, startWeek)
     df = addGuessDate(df,'2012-12-30')
     df = addHoliday(df)
     df = addSundayHoliday(df)
     df = addBeforeNewyear(df, 3)
+    df = addBeforeNewyear(df, 5)
+    df = addAfterNewyear(df, 1)
     df = addAfterNewyear(df, 3)
     df = addAfterNewyear(df, 5)
     df = addBeforeSpringFest(df, 1)
@@ -241,13 +270,17 @@ def feaFactory(df, startWeek=0):
     df = addBeforeNational(df, 3)
     df = addAfterNational(df, 1)
     df = addSaleFea(df)
-    df = addHistoryFea(df)
+    df = addHistoryFea(df, cntDf)
     df = addOneHot(df, ['day_of_week','year','month','holiday','brand'])
     return df
 
 # 训练模型
 def trainModel(X, y, showCoef=True, showAlpha=True):
-    clf = linear_model.RidgeCV(alphas=[0.02*x for x in range(1,500)], scoring='neg_mean_squared_error')
+    # clf = linear_model.ElasticNetCV(
+    #     l1_ratio=[1-(0.01*i)**3 for i in range(1,100)], 
+    #     alphas=[(0.05*i)**2 for i in range(1,100)],
+    #     cv=20)
+    clf = linear_model.RidgeCV(alphas=[(0.05*i)**2 for i in range(1,100)], scoring='neg_mean_squared_error')
     clf.fit(X, y)
     if showCoef:
         print('Coefficients:', clf.coef_)
@@ -297,26 +330,33 @@ def getOof(clf, trainX, trainY, testX, nFold=10):
 if __name__ == '__main__':
     # 导入数据
     df = importDf('../data/fusai_train_20180227.txt')
+    dfA = importDf('../data/fusai_test_A_20180227.txt')
+    answerDfA = importDf('../data/fusai_answer_a_20180307.txt', header=None, colNames=['date','brand','cnt'])
+    dfA.drop(0,inplace=True)
+    dfA = dfA.merge(answerDfA, how='left', on=['date','brand'])
+    df = pd.concat([df, dfA], ignore_index=True)  
 
     # 特征提取
     startTime = datetime.now()
+    print(df.info())
     df = feaFactory(df)
     scaleCols = ['year','sale_last_month','sale_month']
     df,scaler = scalerFea(df, scaleCols)
-    df.loc[(df.is_sunday_holiday==1)&(df.cnt>150)] = None
     df = df.dropna()
     print("feature time: ", datetime.now() - startTime)
     print("训练集：\n",df.tail())
     fea = [
         'is_sunday_holiday',
-        'sale_month',#'sale_last_month',
-        'is_after_newyear3','is_after_newyear5',#'after_new_year_weight',
-        'is_before_spring_fest1','is_before_spring_fest5','is_after_spring_fest3','is_before_spring_fest9',
+        'sale_last_yoy','sale_last_month',
+        'is_before_newyear3','is_before_newyear5',
+        'is_after_newyear1','is_after_newyear3','is_after_newyear5','after_new_year_weight',
+        'is_before_spring_fest1',
+        'is_before_spring_fest5','is_after_spring_fest3','is_before_spring_fest9',
         'is_after_worker1',
-        'is_after_national1'
+        'is_after_national1','is_before_national3'
         ]
-    fea.extend(['month_%d'%x for x in [1,2,3,4,5,6,7,8,9,10,11,12]])
-    fea.extend(['day_of_week_%d'%x for x in [1,2,3,4,5,6]])
+    fea.extend(['month_%d'%x for x in [1,2,3,4,5,6,7,8,10,12]])
+    fea.extend(['day_of_week_%d'%x for x in [1,2,3,4,6,7]])
     fea.extend(['holiday_%d'%x for x in range(0,3)])
     # 填补缺失字段
     for x in [x for x in fea if x not in df.columns]:
@@ -324,58 +364,69 @@ if __name__ == '__main__':
     print("模型输入：\n",df[fea].info())
 
     # 用滑动窗口检验模型
-    costDf = {b:pd.DataFrame(index=fea+['cost']) for b in range(1,11)}
+    costDf = {b:pd.DataFrame(index=fea+['cost','alpha']) for b in range(1,11)}
     dtCostDf = pd.DataFrame(columns=['cost'])
     clfs = {}
-    for dt in pd.date_range(start='2015-01-01', end='2015-05-01', freq='MS'):
+    for dt in pd.date_range(start='2015-06-01', end='2015-10-01', freq='MS'):
         splitDate = dt
         trainDf = df[(df.guess_date < splitDate)]
+        trainDf = cleanDf(trainDf)
         testDf = df[(df.guess_date >= splitDate) & (df.guess_date < splitDate+timedelta(days=365))]
         trainDf['predict'] = np.nan
         testDf['predict'] = np.nan
+        testDf.loc[(testDf.holiday>0),'predict'] = testDf.loc[(testDf.holiday>0),'cnt_holiday_median']
         for b in df.brand.value_counts().index:
-            clf = trainModel(trainDf[trainDf.brand==b][fea].values, trainDf[trainDf.brand==b]['cnt'].values, showCoef=False)
-            clfs[b] = clf
-            testDf.loc[testDf.brand==b,'predict'] = clf.predict(testDf[testDf.brand==b][fea].values)
+            for h in range(0,2):
+                clf = trainModel(trainDf[trainDf.brand==b][trainDf.holiday==h][fea].values, trainDf[trainDf.brand==b][trainDf.holiday==h]['cnt'].values, showCoef=False, showAlpha=False)
+                clfs['%d_%d'%(b,h)] = clf
+                testDf.loc[(testDf.brand==b)&(testDf.holiday==h),'predict'] = clf.predict(testDf[testDf.brand==b][testDf.holiday==h][fea].values)
+
             testDf.loc[:,'predict'] = testDf['predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
-            testDf.loc[testDf.is_sunday_holiday==1,'predict'] = testDf.loc[testDf.is_sunday_holiday==1,'predict'].map(lambda x: x-100 if x>100 else x)   #修正周日休息日的数据
+            # testDf.loc[testDf.is_sunday_holiday==1,'predict'] = testDf.loc[testDf.is_sunday_holiday==1,'predict'].map(lambda x: x%100 if x>100 else x)   #修正周日休息日的数据
             cost = metrics.mean_squared_error(testDf[testDf.brand==b]['cnt'].values, testDf[testDf.brand==b]['predict'].values) 
-            costDf[b][dt] = list(clf.coef_)+[cost]
+            costDf[b][dt] = list(clf.coef_)+[cost, clf.alpha_]
         cost = metrics.mean_squared_error(testDf['cnt'].values, testDf['predict'].values)
         dtCostDf.loc[dt, 'cost'] = cost
     for b,cdf in costDf.items():
         cdf['mean'] = cdf.mean(axis=1)
         cdf['std'] = cdf.std(axis=1)
+        cdf.drop(cdf.columns[:5], axis=1, inplace=True)
+        cdf.loc[:len(fea),'pearsonr'] = cdf.index[:len(fea)].map(lambda x: pearsonr(df[df.brand==b]['cnt'], df[df.brand==b][x]))
     print(costDf)
     print(dtCostDf)
     # 绘制误差曲线
     for b in range(1,11):
         deltaSeries = countDeltaY(testDf[testDf.brand==b].set_index(['guess_date'])['predict'], testDf[testDf.brand==b].set_index(['guess_date'])['cnt'], show=False, title='brand%d'%b, subplot=(5,2,b))
-    plt.show()
+    # plt.show()
 
     # 导出完整训练集预测记录
-    df['predict'] = df['delta'] = np.nan
-    for b in range(1,11):
-        df.loc[df.brand==b,'predict'], _ = getOof(clfs[b], df.loc[df.brand==b,fea].values, df.loc[df.brand==b,'cnt'].values, testDf.loc[df.brand==b,fea].values, nFold=10)
-    df['delta'] = df['predict'] - df['cnt']
-    cost = metrics.mean_squared_error(df['cnt'].values, df['predict'].values) 
-    print('cv cost:', cost)
-    exportResult(df[['date','guess_date','brand','cnt','predict','delta','day_of_week','holiday','sale_month']], "train_predict.csv", header=True)
-    exit()
+    # df['predict'] = df['delta'] = np.nan
+    # for b in range(1,11):
+    #     df.loc[df.brand==b,'predict'], _ = getOof(clfs[b], df.loc[df.brand==b,fea].values, df.loc[df.brand==b,'cnt'].values, testDf.loc[df.brand==b,fea].values, nFold=10)
+
+    #     df.loc[(df.brand==b)&(df==),'predict'], _ = getOof(clfs[b], df.loc[df.brand==b,fea].values, df.loc[df.brand==b,'cnt'].values, testDf.loc[df.brand==b,fea].values, nFold=10)
+    #     df.loc[df.brand==b,'predict'], _ = getOof(clfs[b], df.loc[df.brand==b,fea].values, df.loc[df.brand==b,'cnt'].values, testDf.loc[df.brand==b,fea].values, nFold=10)
+    # df['delta'] = df['predict'] - df['cnt']
+    # cost = metrics.mean_squared_error(df['cnt'].values, df['predict'].values) 
+    # print('cv cost:', cost)
+    # exportResult(df[['date','guess_date','brand','cnt','predict','delta','day_of_week','holiday','sale_month']], "train_predict.csv", header=True)
+    # exit()
 
 
     # 正式模型
-    modelName = "linear2A"
+    df = cleanDf(df)
+    modelName = "linear2B"
     clfs = {}
     for b in range(1,11):
-        clf = trainModel(df[df.brand==b][fea].values, df[df.brand==b]['cnt'].values)
-        joblib.dump(clf, './%s-b%d.pkl' % (modelName,b), compress=3)
-        clfs[b] = clf
+        for h in range(0,2):
+            clf = trainModel(df[df.brand==b][df.holiday==h][fea].values, df[df.brand==b][df.holiday==h]['cnt'].values, showCoef=False, showAlpha=False)
+            joblib.dump(clf, './%s-b%dh%d.pkl' % (modelName,b,h), compress=3)
+            clfs['%d_%d'%(b,h)] = clf
 
     # 预测集准备
     startTime = datetime.now()
-    predictDf = importDf('../data/fusai_test_A_20180227.txt')
-    predictDf = feaFactory(predictDf, startWeek=df.loc[df.index[-1], 'week'])
+    predictDf = importDf('../data/fusai_test_B_20180227.txt')
+    predictDf = feaFactory(predictDf, startWeek=df.loc[df.index[-1], 'week'], cntDf=df)
     # 填补缺失字段
     for x in [x for x in fea if x not in predictDf.columns]:
         predictDf[x] = 0
@@ -385,13 +436,17 @@ if __name__ == '__main__':
 
     # 开始预测
     predictDf['predict'] = np.nan
+    predictDf.loc[(predictDf.holiday>0),'predict'] = predictDf.loc[(predictDf.holiday>0),'cnt_holiday_median']
     for b in range(1,11):
-        predictDf.loc[predictDf.brand==b,'predict'] = clfs[b].predict(predictDf[predictDf.brand==b][fea].values)
+        for h in range(0,2):
+            predictDf.loc[(predictDf.brand==b)&(predictDf.holiday==h),'predict'] = clfs['%d_%d'%(b,h)].predict(predictDf[predictDf.brand==b][predictDf.holiday==h][fea].values)
+        # predictDf.loc[predictDf.brand==b,'predict'] = clfs[b].predict(predictDf[predictDf.brand==b][fea].values)
     print("预测结果：\n",predictDf[['date','brand','predict']].head())
     exportResult(predictDf[['date','guess_date','brand','predict','day_of_week','holiday','sale_month']], "%s_predict.csv" % modelName, header=True)
     predictDf['predict'] = predictDf['predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
-    predictDf.loc[predictDf.is_sunday_holiday==1,'predict'] = predictDf.loc[predictDf.is_sunday_holiday==1,'predict'].map(lambda x: x-100 if x>100 else x)   #修正周日休息日的数据
+    # predictDf.loc[predictDf.is_sunday_holiday==1,'predict'] = predictDf.loc[predictDf.is_sunday_holiday==1,'predict'].map(lambda x: x%100 if x>100 else x)   #修正周日休息日的数据
     exportResult(predictDf[['date','brand','predict']], "%s.txt" % modelName, sep='\t')
+    exit()
 
     # 生成模型融合数据集
     df['predict'] = np.nan
@@ -399,6 +454,7 @@ if __name__ == '__main__':
     for b in range(1,11):
         df.loc[df.brand==b,'predict'], predictDf.loc[predictDf.brand==b,'predict'] = getOof(clfs[b], df.loc[df.brand==b,fea].values, df.loc[df.brand==b,'cnt'].values, predictDf.loc[predictDf.brand==b,fea].values, nFold=10)
     predictDf['predict'] = predictDf['predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
+    predictDf.loc[predictDf.is_sunday_holiday==1,'predict'] = predictDf.loc[predictDf.is_sunday_holiday==1,'predict'].map(lambda x: x%100 if x>100 else x)   #修正周日休息日的数据
     exportResult(df[['date','brand','predict']], "%s_oof_train.csv" % modelName, header=True)
     exportResult(predictDf[['date','brand','predict']], "%s_oof_testA.csv" % modelName, header=True)
 
