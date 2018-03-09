@@ -3,8 +3,10 @@
 
 '''
 融合方式： 加权平均
-权值计算：本地误差相差不大，基本均分
-结果： B榜（34782）
+权值计算：按照各个品牌的线下误差，作误差倒数的归一化加权
+        其中yuna_predict的brand5数据不沿用，yuna_predict的brand8数据权重人为减小
+后期处理：对节假日预测偏低的数据人为改动
+结果： B榜（37048）
 
 '''
 
@@ -114,9 +116,9 @@ def countDeltaY(predictSeries, labelSeries, show=True, title='', subplot=None):
 if __name__ == '__main__':
     # 导入数据
     dfs = []
-    dfs.append(importDf('../lake/resultB1_lake_A.txt', header=None, index_col=[0,1]))
+    dfs.append(importDf('../lake/resultB3_lake_aveHoliday2_dropData.txt', header=None, index_col=[0,1]))
     dfs.append(importDf('../keng/prophet_dateProperty_B_fusai_3_7.txt', header=None, index_col=[0,1]))
-    dfs.append(importDf('../linear1/linear2B(49479).txt', header=None, index_col=[0,1]))
+    dfs.append(importDf('../xgboost1/xgboost2B.txt', header=None, index_col=[0,1]))
     for df in dfs:
         df.columns = ['predict']
         df.index.names = ['date','brand']
@@ -126,9 +128,22 @@ if __name__ == '__main__':
     otherDf = importDf('../linear1/linear2B_predict.csv', sep=',')
     df = pd.merge(df, otherDf[['date','brand','guess_date','day_of_week','holiday']], how='left', on=['date','brand'])
     # 按排名加权平均
-    df['predict'] = df['lake_predict']*0.33 + df['keng_predict']*0.34 + df['yuna_predict']*0.33
-    print(df.head())
+    rankList = {
+        1:[0.24,0.35,0.41],
+        2:[0.28,0.30,0.42],
+        3:[0.40,0.26,0.34],
+        4:[0.28,0.36,0.36],
+        5:[0.50,0.50,0.00],
+        6:[0.34,0.32,0.34],
+        7:[0.36,0.36,0.28],
+        8:[0.35,0.42,0.23],
+        9:[0.35,0.37,0.28],
+        10:[0.30,0.40,0.30]
+    }
+    for b in range(1,11):
+        df.loc[df.brand==b,'predict'] = df.loc[df.brand==b,'lake_predict']*rankList[b][0] + df.loc[df.brand==b,'keng_predict']*rankList[b][1] + df.loc[df.brand==b,'yuna_predict']*rankList[b][2]
+    exit()
 
-    modelName = 'average2B'
+    modelName = 'average2B_brand'
     exportResult(df, "%s_predict.csv" % modelName, header=True, sep=',')
-    exportResult(df[['date','brand','predict']], "%s_0307.txt" % modelName)
+    exportResult(df[['date','brand','predict']], "%s_0308.txt" % modelName)
