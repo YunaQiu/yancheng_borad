@@ -6,28 +6,30 @@
 模型参数：'objective': 'reg:linear',
         'eval_metric':'rmse',
         'silent': True,
-        'eta': 0.08,
-        'max_depth': 5,
-        'gamma': 200,
-        'min_child_weight': 14
+        'eta': 0.1,
+        'max_depth': 6,
+        'gamma': 0,
+        'min_child_weight': 7,
+        'subsample':1,
         'colsample_bytree': 0.9
+        'alpha':1600,
         'num_boost_round': 1500
-        'early_stopping_rounds': 30
+        'early_stopping_rounds': 2
         'nfold': 10
-特殊处理：训练前经过数据清洗：去除前后7天内异常拔高的数据（除非当天超过3个品牌有拔高情况）
-        模型按照假日类型拆分成3个训练
-        参数中max_depth/gamma/min_child_weight采用10折的网格搜索确定
+前期处理：训练前经过数据清洗：舍弃部分品牌前期的异常数据
+        参数中max_depth/gamma/min_child_weight/subsample/colsample_bytree/alpha采用10折的网格搜索确定
         训练模型时采用10折cv确定树的棵树后，再用全部数据训练一次
+后期处理：假日类型2的预测结果用各自品牌的假日类型2的历史中位数代替
+        假日类型0且预测结果小于30的预测值，加多100的预测量
 特征： 星期1~7的onehot标记
       月份1~12的onehot标记
       节假日类型0/1/2的onehot标记
       是否周日休息日
-      上个月销售量/上个月销售量的同比（取自零售量比赛数据，其中17年11月数据根据网上的16年同期增长比估算）
       元旦前5个工作日权重，元旦后5个工作日权重
       春节前9个工作日权重，春节后5个工作日权重
       五一后1个工作日权重
       国庆前5个工作日权重，国庆后3个工作日权重
-结果： A榜（37033）
+结果： 线下（51789）
 
 '''
 
@@ -101,16 +103,23 @@ def addSundayHoliday(df):
     return df
 
 # 异常数据清除
-def cleanDf(df):
-    tempDf = df.copy()
-    tempDf['unusual'] = tempDf.apply(lambda x: x.cnt > tempDf[(tempDf.brand==x.brand)&(abs(tempDf.date-x.date)<7)&(tempDf.date-x.date!=0)]['cnt'].max() * 1.8, axis=1)
-    tempDf.loc[tempDf.unusual,'unusual'] = tempDf[tempDf.unusual].apply(lambda x: tempDf[(tempDf.unusual)&(tempDf.date==x.date)].brand.count() < 4, axis=1)
+def cleanDf(df, beforeDate='2018-01-01'):
+    tempDf = df[df.guess_date<beforeDate].copy()
+    # tempDf['unusual'] = tempDf.apply(lambda x: x.cnt > tempDf[(tempDf.brand==x.brand)&(abs(tempDf.date-x.date)<7)&(tempDf.date-x.date!=0)]['cnt'].max() * 1.8, axis=1)
+    # tempDf.loc[tempDf.unusual,'unusual'] = tempDf[tempDf.unusual].apply(lambda x: tempDf[(tempDf.unusual)&(tempDf.date==x.date)].brand.count() < 3, axis=1)
 
     cleanIndex = set()
-    cleanIndex |= set(tempDf[tempDf.unusual].index)
-    cleanIndex |= set(df[(df.holiday==1)&(df.cnt>400)].index)
-    cleanIndex |= set(df[(df.holiday==2)&(df.cnt>70)].index)
-    cleanIndex |= set(df[(df.is_sunday_holiday==1)&(df.cnt>150)].index)
+    # cleanIndex |= set(tempDf[tempDf.unusual].index)
+    cleanIndex |= set(tempDf[(tempDf.holiday==1)&(tempDf.cnt>400)].index)
+    cleanIndex |= set(tempDf[(tempDf.holiday==2)&(tempDf.cnt>70)].index)
+    cleanIndex |= set(tempDf[(tempDf.is_sunday_holiday==1)&(tempDf.cnt>150)].index)
+    cleanIndex |= set(tempDf[(tempDf.brand==8)&(tempDf.guess_date<'2015-09-01')].index)
+    cleanIndex |= set(tempDf[(tempDf.brand==5)&(tempDf.guess_date<'2015-11-01')].index)
+    cleanIndex |= set(tempDf[(tempDf.brand==2)&(tempDf.guess_date<'2014-07-01')].index)
+    cleanIndex |= set(tempDf[(tempDf.brand==9)&(tempDf.guess_date<'2014-03-01')].index)
+    cleanIndex |= set(tempDf[(tempDf.brand==6)&(tempDf.guess_date<'2014-03-01')].index)
+    # cleanIndex |= set(tempDf[(tempDf.brand==7)&(tempDf.guess_date<'2015-03-01')&(tempDf.holiday>0)].index)
+    # cleanIndex |= set(tempDf[(tempDf.brand==10)&(tempDf.guess_date<'2013-07-01')].index)
     df.drop(cleanIndex, inplace=True)
     return df
 
@@ -212,6 +221,8 @@ def addAfterNational(df, dayLen):
 def addBeforeCarShow(df, dayLen):
     df['before_carshow_weight'] = 0
     showDate = {
+        2013:'2013-09-17',
+        2014:'2014-09-17',
         2015:'2015-09-18',
         2016:'2016-09-14',
         2017:'2017-09-15'}
@@ -278,15 +289,19 @@ def addHistoryFea(df, cntDf=None):
     df['cnt_his'] = df[['brand','date','holiday']].apply(lambda x: list(brandDf.loc[pd.IndexSlice[x.brand,:x.date,x.holiday],'cnt'].values), axis=1).values
     df['cnt_holiday_mean'] = df['cnt_his'].map(lambda x: np.mean(x))
     df['cnt_holiday_median'] = df['cnt_his'].map(lambda x: np.median(x))
-    df['cnt_holiday_max'] = df['cnt_his'].map(lambda x: np.max(x))
-    df['cnt_holiday_min'] = df['cnt_his'].map(lambda x: np.min(x))
+    # df['cnt_holiday_max'] = df['cnt_his'].map(lambda x: np.max(x))
+    # df['cnt_holiday_min'] = df['cnt_his'].map(lambda x: np.min(x))
 
-    monthDf = cntDf.sort_values(by=['brand','date','month']).set_index(['brand','date','month'])[['cnt']]
-    df['cnt_his'] = df[['brand','date','month']].apply(lambda x: list(monthDf.loc[pd.IndexSlice[x.brand,:x.date,x.month],'cnt'].values), axis=1).values
-    df['cnt_month_mean'] = df['cnt_his'].map(lambda x: np.mean(x))
-    df['cnt_month_median'] = df['cnt_his'].map(lambda x: np.median(x))
-    df['cnt_month_max'] = df['cnt_his'].map(lambda x: np.max(x))
-    df['cnt_month_min'] = df['cnt_his'].map(lambda x: np.min(x))
+    brandDf = pd.pivot_table(cntDf, index='brand', values='date', aggfunc=np.min)
+    brandDf.columns = ['start_date']
+    df = df.merge(brandDf, how='left', left_on='brand', right_index=True)
+
+    # monthDf = cntDf.sort_values(by=['brand','date','month']).set_index(['brand','date','month'])[['cnt']]
+    # df['cnt_his'] = df[['brand','date','month']].apply(lambda x: list(monthDf.loc[pd.IndexSlice[x.brand,:x.date,x.month],'cnt'].values), axis=1).values
+    # df['cnt_month_mean'] = df['cnt_his'].map(lambda x: np.mean(x))
+    # df['cnt_month_median'] = df['cnt_his'].map(lambda x: np.median(x))
+    # df['cnt_month_max'] = df['cnt_his'].map(lambda x: np.max(x))
+    # df['cnt_month_min'] = df['cnt_his'].map(lambda x: np.min(x))
     df.drop(['cnt_his'], axis=1, inplace=True)
     return df
 
@@ -320,26 +335,31 @@ def feaFactory(df, startWeek=0, cntDf=None):
     df = addBeforeNational(df, 5)
     df = addAfterNational(df, 3)
     df = addBeforeCarShow(df, 5)
-    df = addAfterCarShow(df, 15)
-    df = addSaleFea(df)
+    df = addAfterCarShow(df, 20)
+    # df = addSaleFea(df)
+    if startWeek==0:
+        cntDf = cleanDf(df.copy())
     df = addHistoryFea(df, cntDf=cntDf)
     df = addOneHot(df, ['day_of_week','year','month','holiday','brand'])
     return df
 
 class XgbModel:
-    def __init__(self, feaNames=None):
+    def __init__(self, feaNames=None, params={}):
         self.feaNames = feaNames
         self.params = {
             'objective': 'reg:linear',
             'eval_metric':'rmse',
             'silent': True,
-            'eta': 0.08,
-            'max_depth': 5,
-            'gamma': 200,
+            'eta': 0.1,
+            'max_depth': 6,
+            'gamma': 0,
             'subsample':1,
             'colsample_bytree': 0.9,
-            'min_child_weight': 14
+            'min_child_weight': 7,
+            'alpha':1600
         }
+        for k,v in params.items():
+            self.params[k] = v
         self.clf = None
 
     def train(self, X, y, train_size=1, test_size=0.1, verbose=True, num_boost_round=1000, early_stopping_rounds=3):
@@ -360,7 +380,7 @@ class XgbModel:
         )
         self.clf = clf
 
-    def trainCV(self, X, y, nFold=10, verbose=True, num_boost_round=1500, early_stopping_rounds=30):
+    def trainCV(self, X, y, nFold=10, verbose=True, num_boost_round=1500, early_stopping_rounds=2):
         dtrain = xgb.DMatrix(X, label=y, feature_names=self.feaNames)
         cvResult = xgb.cv(
             self.params, dtrain, 
@@ -375,29 +395,38 @@ class XgbModel:
         )
         self.clf = clf
 
-    def gridSearch(self, X, y, nFold=10, verbose=1, num_boost_round=150, early_stopping_rounds=30):
+    def gridSearch(self, X, y, nFold=10, verbose=1, num_boost_round=70, early_stopping_rounds=30):
         paramsGrids = {
-            # 'gamma': [80,100,120,150,180,200,250,300,350],
-            # 'max_depth': list(range(4,10)),
-            'min_child_weight': list(range(8,30,2))
+            # 'n_estimators': [70+5*i for i in range(0,10)]
+            # 'gamma': [100000+100000*i for i in range(0,10)],
+            # 'max_depth': list(range(4,12)),
+            # 'min_child_weight': list(range(5,15))
+            # 'subsample': [1,0.95,0.9,0.85,0.8]
+            # 'colsample_bytree': [1,0.95,0.9,0.85,0.8]
+            'reg_alpha':[1000+100*i for i in range(0,20)]
         }
         gsearch = GridSearchCV(
             estimator = xgb.XGBRegressor(
                 max_depth = self.params['max_depth'], 
                 gamma = self.params['gamma'],
                 learning_rate = self.params['eta'],
+                min_child_weight =  self.params['min_child_weight'],
                 subsample = self.params['subsample'],
                 colsample_bytree = self.params['colsample_bytree'],
                 silent = self.params['silent'],
-                n_estimators = num_boost_round),
+                # reg_alpha = self.params['alpha'],
+                n_estimators = num_boost_round
+            ),
             param_grid = paramsGrids,
             scoring = 'neg_mean_squared_error',
             cv = nFold,
-            verbose = verbose
+            verbose = verbose,
+            n_jobs = 3
         )
         gsearch.fit(X, y)
         print(pd.DataFrame(gsearch.cv_results_))
         print(gsearch.best_params_)
+        exit()
 
     def predict(self, X):
         return self.clf.predict(xgb.DMatrix(X, feature_names=self.feaNames))
@@ -446,8 +475,6 @@ def getOof(clf, trainX, trainY, testX, nFold=10):
         kfTestX = trainX[testIdx]
         clf.trainCV(kfTrainX, kfTrainY, verbose=False)
         oofTrain[testIdx] = clf.predict(kfTestX)
-        # oofTestSkf[:,i] = clf.predict(testX)
-    # oofTest[:] = oofTestSkf.mean(axis=1)
     clf.trainCV(trainX,trainY, verbose=False)
     oofTest = clf.predict(testX)
     return oofTrain, oofTest
@@ -456,18 +483,23 @@ def getOof(clf, trainX, trainY, testX, nFold=10):
 if __name__ == '__main__':
     # 导入数据
     df = importDf('../data/fusai_train_20180227.txt')
+    dfA = importDf('../data/fusai_test_A_20180227.txt')
+    answerDfA = importDf('../data/fusai_answer_a_20180307.txt', header=None, colNames=['date','brand','cnt'])
+    dfA.drop(0,inplace=True)
+    dfA = dfA.merge(answerDfA, how='left', on=['date','brand'])
+    df = pd.concat([df, dfA], ignore_index=True)  
 
     # 特征提取
     startTime = datetime.now()
     df = feaFactory(df)
     print("feature time: ", datetime.now() - startTime)
-    df = cleanDf(df)
     print("训练集：\n",df.tail())
     fea = [
         # 'cnt_holiday_median','cnt_holiday_mean',#'cnt_holiday_max','cnt_holiday_min',
-        #'cnt_month_median','cnt_month_mean','cnt_month_max','cnt_month_min',
+        # 'cnt_month_median','cnt_month_mean',#'cnt_month_max','cnt_month_min',
         'is_sunday_holiday',
-        'sale_last_month','sale_last_yoy',#'sale_month_predict','sale_last_year'
+        # 'start_date',
+        # 'sale_last_month','sale_last_yoy',#'sale_month_predict','sale_last_year'
         'before_new_year_weight','after_new_year_weight',
         'before_spring_fest_weight','after_spring_fest_weight',
         'after_worker_weight',
@@ -487,59 +519,54 @@ if __name__ == '__main__':
     # 用滑动窗口检验模型
     costDf = pd.DataFrame(index=fea+['cost'])
     xgbModel = XgbModel(feaNames=fea)
-    holidayModels = {x:XgbModel(feaNames=fea) for x in range(0,3)}
-    for dt in pd.date_range(start='2015-05-01', end='2015-05-01', freq='MS'):
+    for dt in pd.date_range(start='2015-06-01', end='2015-10-01', freq='MS'):
         # 准备训练/测试集
         splitDate = dt
         trainDf = df[(df.guess_date < splitDate)]
-        # trainDf = cleanDf(trainDf)
+        trainDf = cleanDf(trainDf, dt)
         testDf = df[(df.guess_date >= splitDate) & (df.guess_date < splitDate+timedelta(days=365))]
         # 训练并统计结果
         # xgbModel.gridSearch(trainDf[fea].values, trainDf['cnt'].values, nFold=10)
         xgbModel.trainCV(trainDf[fea].values, trainDf['cnt'].values, nFold=10)
         testDf.loc[:,'predict'] = xgbModel.predict(testDf[fea].values)
+        testDf.loc[(testDf.holiday>1), 'predict'] = testDf.loc[(testDf.holiday>1), 'cnt_holiday_median']
+        testDf['predict'] = testDf.apply(lambda x: x.predict+100 if (x.holiday==0)&(x.predict<30) else x.predict, axis=1)
+        testDf.loc[(testDf.predict<0),'predict'] = 5
+
         scoreDf = xgbModel.getFeaScore()
         scoreDf.columns = [dt.strftime('%Y-%m')]
         costDf = costDf.merge(scoreDf, how='left', left_index=True, right_index=True)
         cost = metrics.mean_squared_error(testDf['cnt'].values, testDf['predict'].values)
         costDf.loc['cost',dt.strftime('%Y-%m')] = cost
-        for x in range(0,3):
-            holidayModels[x].trainCV(trainDf[trainDf.holiday==x][fea].values, trainDf[trainDf.holiday==x]['cnt'].values, nFold=10)
-            testDf.loc[testDf.holiday==x,'holiday_predict'] = holidayModels[x].predict(testDf[testDf.holiday==x][fea].values)
-        print(metrics.mean_squared_error(testDf['cnt'].values, testDf['holiday_predict'].values))
     print(costDf)
     # 绘制误差曲线
     for b in range(1,11):
         deltaSeries = countDeltaY(testDf[testDf.brand==b].set_index(['guess_date'])['predict'], testDf[testDf.brand==b].set_index(['guess_date'])['cnt'], show=False, title='brand%d'%b, subplot=(5,2,b))
+        print('brand%d cost:'%b,metrics.mean_squared_error(testDf[testDf.brand==b]['cnt'].values, testDf[testDf.brand==b]['predict'].values))
     plt.show()
-    # exit()
 
     # 导出完整训练集预测记录
-    # startTime = datetime.now()
-    # df['predict'] = df['delta'] = np.nan
-    # df.loc[:,'predict'], predict = getOof(xgbModel, df.loc[:,fea].values, df.loc[:,'cnt'].values, testDf.loc[:,fea].values, nFold=10)
-    # df['delta'] = df['predict'] - df['cnt']
-    # cost = metrics.mean_squared_error(df['cnt'].values, df['predict'].values) 
-    # print('cv cost:', cost)
-    # deltaSeries = countDeltaY(df.set_index(['guess_date'])['predict'], df.set_index(['guess_date'])['cnt'], show=False)
-    # exportResult(df[['date','guess_date','brand','cnt','predict','delta','day_of_week','holiday','cnt_month_mean','sale_month','sale_last_year']], "train_predict.csv", header=True)
-    # print("export trainSet time: ", datetime.now() - startTime)
+    startTime = datetime.now()
+    df['predict'] = df['delta'] = np.nan
+    df.loc[:,'predict'], predict = getOof(xgbModel, df.loc[:,fea].values, df.loc[:,'cnt'].values, testDf.loc[:,fea].values, nFold=10)
+    df['delta'] = df['predict'] - df['cnt']
+    cost = metrics.mean_squared_error(df['cnt'].values, df['predict'].values) 
+    print('cv cost:', cost)
+    deltaSeries = countDeltaY(df.set_index(['guess_date'])['predict'], df.set_index(['guess_date'])['cnt'], show=False)
+    exportResult(df[['date','guess_date','brand','cnt','predict','delta','day_of_week','holiday']], "train_predict.csv", header=True)
+    print("export trainSet time: ", datetime.now() - startTime)
     # exit()
 
 
     # 正式模型
-    modelName = "xgboost2A_holiday"
+    modelName = "xgboost2B"
     xgbModel.trainCV(df[fea].values, df['cnt'].values)
     xgbModel.getFeaScore(show=True)
     xgbModel.clf.save_model('%s.model'%modelName)
-    for x in range(0,3):
-        holidayModels[x].trainCV(df[df.holiday==x][fea].values, df[df.holiday==x]['cnt'].values)
-        holidayModels[x].clf.save_model('%s_h%d.model'%(modelName,x))
-    # exit()
 
     # 预测集准备
     startTime = datetime.now()
-    predictDf = importDf('../data/fusai_test_A_20180227.txt')
+    predictDf = importDf('../data/fusai_test_B_20180227.txt')
     predictDf = feaFactory(predictDf, startWeek=df.loc[df.index[-1], 'week'], cntDf=df)
     # 填补缺失字段
     for x in [x for x in fea if x not in predictDf.columns]:
@@ -549,19 +576,17 @@ if __name__ == '__main__':
 
     # 开始预测
     predictDf.loc[:,'predict'] = xgbModel.predict(predictDf[fea].values)
-    for x in range(0,3):
-        predictDf.loc[predictDf.holiday==x,'holiday_predict'] = holidayModels[x].predict(predictDf[predictDf.holiday==x][fea].values)    
     print("预测结果：\n",predictDf[['date','brand','predict']].head())
-    exportResult(predictDf[['date','guess_date','brand','predict','holiday_predict','day_of_week','holiday','sale_month']], "%s_predict.csv" % modelName, header=True)
-    print(predictDf[predictDf.predict<0])
-    predictDf['predict'] = predictDf['predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
-    predictDf['holiday_predict'] = predictDf['holiday_predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
-    # exportResult(predictDf[['date','brand','predict']], "%s.txt" % modelName, sep='\t')
-    exportResult(predictDf[['date','brand','holiday_predict']], "%s.txt" % modelName, sep='\t')
-    exit()
+    exportResult(predictDf[['date','guess_date','brand','predict','day_of_week','holiday']], "%s_predict.csv" % modelName, header=True)
+    print(predictDf[predictDf.predict<0][['date','guess_date','brand','predict','day_of_week','holiday']])
+    predictDf.loc[(predictDf.holiday>1), 'predict'] = predictDf.loc[(predictDf.holiday>1), 'cnt_holiday_median']
+    predictDf['predict'] = predictDf.apply(lambda x: x.predict+100 if (x.holiday==0)&(x.predict<30) else x.predict, axis=1)
+    predictDf.loc[(predictDf.predict<0),'predict'] = 5
+    exportResult(predictDf[['date','brand','predict']], "%s.txt" % modelName, sep='\t')
+    # exit()
 
     # 生成模型融合数据集
-    df.loc[:,'predict'], predictDf.loc[:,'predict'] = getOof(clfs[b], df[fea].values, df['cnt'].values, predictDf[fea].values, nFold=10)
+    df.loc[:,'predict'], predictDf.loc[:,'predict'] = getOof(xgbModel, df[fea].values, df['cnt'].values, predictDf[fea].values, nFold=10)
     predictDf['predict'] = predictDf['predict'].map(lambda x: 0 if x<0 else x)   #修正负数值
     exportResult(df[['date','brand','predict']], "%s_oof_train.csv" % modelName, header=True)
     exportResult(predictDf[['date','brand','predict']], "%s_oof_testA.csv" % modelName, header=True)
